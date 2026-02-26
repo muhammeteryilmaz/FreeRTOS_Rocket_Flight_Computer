@@ -81,6 +81,8 @@
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
+TIM_HandleTypeDef htim1;
+
 /* Definitions for defaultTask */
 /*osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
@@ -134,19 +136,22 @@ uint8_t dig_H1, dig_H3;
 int16_t dig_H2, dig_H4, dig_H5;
 int8_t dig_H6;
 
+
+
 typedef struct {
-	  int32_t temperature;
-	  uint32_t pressure, humidity;
+	  float temperature, pressure;
+	  uint32_t humidity;
 } BMEData_t;
 
-int32_t temp;
-uint32_t press, hum;
+float temp, press;
+uint32_t hum;
 
 QueueHandle_t xBMEQueue;
 
 uint8_t isQueueCreated;
 uint8_t isControlCreated;
-
+int bmeAddress;
+HAL_StatusTypeDef status;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -154,6 +159,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
+static void MX_TIM1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -171,7 +177,12 @@ int32_t BME280_Compensate_Temperature(int32_t adc_T);
 uint32_t BME280_Compensate_Pressure(int32_t adc_P);
 uint32_t BME280_Compensate_Humidity(int32_t adc_H);
 void vBMETask(void *pvParameters);
+void findBME(void);
 
+// -----------------Motor------------------
+void ServoInit(void);
+void ServoStop(void);
+void ServoRun(void);
 // -----------------Control Task------------------
 void vControlTask(void *pvParameters);
 /* USER CODE END PFP */
@@ -212,9 +223,14 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  findBME();
+  HAL_Delay(100);
+  BME280_Read_Calibration();
   BME280_Init();
   MPU6050_Init();
+  ServoInit();
 
   xIMUQueue = xQueueCreate(5, sizeof(IMUData_t));
   xBMEQueue = xQueueCreate(5, sizeof(BMEData_t));
@@ -399,6 +415,71 @@ static void MX_I2C2_Init(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 167;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 19999;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -411,6 +492,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -469,22 +551,6 @@ void readGyroData(IMUData_t *data){
 
 }
 
-
-/*void vIMUTask(void *pvParameters){
-    IMUData_t data;
-
-    for(;;){
-        readAccelData(&data);
-        readGyroData(&data);
-
-        gyX = data.gX;
-        gyY = data.gY;
-        gyZ = data.gZ;
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}*/
-
 void vIMUTask(void *pvParameters){
 	TickType_t lastWakeTime = xTaskGetTickCount();
 	IMUData_t data;
@@ -512,13 +578,13 @@ void BME280_Init() {
 
     uint8_t reset_cmd = 0xB6;
     HAL_I2C_Mem_Write(&hi2c2, BME280_I2C_ADDRESS, BME280_REG_RESET, 1, &reset_cmd, 1, HAL_MAX_DELAY);
-
+    HAL_Delay(100);
 
     uint8_t filter = 0xA4;
     HAL_I2C_Mem_Write(&hi2c2, BME280_I2C_ADDRESS, BME280_REG_CONFIG, 1, &filter, 1, HAL_MAX_DELAY);
 
     BME280_Read_Calibration();
-
+    HAL_Delay(100);
     uint8_t ctrl_hum = 0x01;
     HAL_I2C_Mem_Write(&hi2c2, BME280_I2C_ADDRESS, BME280_REG_CTRL_HUM, 1, &ctrl_hum, 1, HAL_MAX_DELAY);
 
@@ -528,8 +594,12 @@ void BME280_Init() {
 
 void BME280_Read_Calibration() {
     uint8_t calib_data[26];
-    HAL_I2C_Mem_Read(&hi2c2, BME280_I2C_ADDRESS, BME280_CALIB_DATA_START, 1, calib_data, 26, HAL_MAX_DELAY);
+    status=HAL_I2C_Mem_Read(&hi2c2, BME280_I2C_ADDRESS, BME280_CALIB_DATA_START, 1, calib_data, 26, HAL_MAX_DELAY);
 
+    if(status != HAL_OK){
+
+        return;
+    }
     dig_T1 = (calib_data[1] << 8) | calib_data[0];
     dig_T2 = (calib_data[3] << 8) | calib_data[2];
     dig_T3 = (calib_data[5] << 8) | calib_data[4];
@@ -563,9 +633,10 @@ void BME280_Read_Data(BMEData_t *bmeData) {
     int32_t adc_T = ((uint32_t)data[3] << 12) | ((uint32_t)data[4] << 4) | ((uint32_t)data[5] >> 4);
     int32_t adc_H = ((uint32_t)data[6] << 8) | (uint32_t)data[7];
 
-    bmeData->temperature = BME280_Compensate_Temperature(adc_T);
-    bmeData->pressure = BME280_Compensate_Pressure(adc_P);
+    bmeData->temperature = (float)BME280_Compensate_Temperature(adc_T) / 100.0f;
+    bmeData->pressure = (float)BME280_Compensate_Pressure(adc_P) / 256.0f / 100.0f;
     bmeData->humidity = BME280_Compensate_Humidity(adc_H);
+
 }
 
 int32_t BME280_Compensate_Temperature(int32_t adc_T) {
@@ -604,16 +675,38 @@ void vBMETask(void *pvParameters){
 
 	for(;;){
 		BME280_Read_Data(&data);
-		xStatus = xQueueSend(xBMEQueue, &data, 75);
+		xStatus = xQueueSend(xBMEQueue, &data, 0);
 
 		if(xStatus == pdPASS){
 			// I turn on led to warning
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(57));
 		}
 	}
-
-
 }
+
+void findBME(void){
+    for(int i = 0; i <= 255; i++){
+        if(HAL_I2C_IsDeviceReady(&hi2c2, i, 1, 10) == HAL_OK){
+            bmeAddress = i;
+            HAL_Delay(50);
+        }
+    }
+}
+
+// -----------------Motor-----------------
+
+void ServoInit(void){
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+}
+
+void ServoStop(void){
+	TIM1->CCR1 = 1500;
+}
+
+void ServoRun(void){
+	TIM1->CCR1 = 2000;
+}
+
 
 // -----------------Control Task------------------
 void vControlTask(void *pvParameters){
@@ -622,6 +715,7 @@ void vControlTask(void *pvParameters){
 	BaseType_t xBmeStatus;
 	IMUData_t imuData;
 	BMEData_t bmeData;
+	float prevPressure = 0;
 	isControlCreated=0;
 
 	for(;;){
@@ -629,8 +723,6 @@ void vControlTask(void *pvParameters){
 		xBmeStatus = xQueueReceive(xBMEQueue, &bmeData, 200);
 		isControlCreated=2;
 		if(xImuStatus && xBmeStatus){
-			//imuData->aX
-			//bmeData->pressure
 			gyX = imuData.gX;
 			gyY = imuData.gY;
 			gyZ = imuData.gZ;
@@ -639,6 +731,13 @@ void vControlTask(void *pvParameters){
 			press = bmeData.pressure;
 			hum = bmeData.humidity;
 			isControlCreated=1;
+			if((press-prevPressure) <= -5.00){
+				ServoRun();
+				vTaskDelay(pdMS_TO_TICKS(1000));
+				ServoStop();
+			}
+
+			prevPressure = press;
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(100));
 		}
 	}
