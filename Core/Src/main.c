@@ -27,6 +27,7 @@
 #include "task.h"
 #include "queue.h"
 #include "semphr.h"
+#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,6 +71,9 @@
 #define BME280_CALIB_HUM_START   0xE1
 
 
+#define LORA_HEADER 0xAA
+#define LORA_FOOTER 0xFF
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -82,6 +86,9 @@ I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
 TIM_HandleTypeDef htim1;
+
+UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart5;
 
 /* Definitions for defaultTask */
 /*osThreadId_t defaultTaskHandle;
@@ -121,12 +128,13 @@ typedef struct {
 	float gZ;
 } IMUData_t;
 
+// for debug live expression
 float gyX;
 float gyY;
 float gyZ;
 
 QueueHandle_t xIMUQueue;
-int counter = 0;
+//int counter = 0;
 // -----------------BME280------------------
 uint16_t dig_T1;
 int16_t dig_T2, dig_T3;
@@ -136,13 +144,12 @@ uint8_t dig_H1, dig_H3;
 int16_t dig_H2, dig_H4, dig_H5;
 int8_t dig_H6;
 
-
-
 typedef struct {
 	  float temperature, pressure;
 	  uint32_t humidity;
 } BMEData_t;
 
+// for debug live expression
 float temp, press;
 uint32_t hum;
 
@@ -152,6 +159,28 @@ uint8_t isQueueCreated;
 uint8_t isControlCreated;
 int bmeAddress;
 HAL_StatusTypeDef status;
+
+// -----------------LoRA Communication------------------
+uint8_t setTCmd[6] = {0xC0, 0x00, 0x10, 0x1A, 0x07, 0x44};
+uint8_t setRCmd[6] = {0xC0, 0x00, 0x10, 0x1A, 0x07, 0x44};
+
+typedef struct {
+	float pressure;
+	float gX;
+	float gY;
+	float gZ;
+
+}LoRaBuffer_t;
+
+QueueHandle_t xLoraQueue;
+
+float LoraPress;
+float LoraGx;
+float LoraGy;
+float LoraGz;
+BaseType_t LoraStatus;
+BaseType_t LoraSendStatus;
+int counter = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -160,6 +189,8 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_UART4_Init(void);
+static void MX_UART5_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -183,8 +214,24 @@ void findBME(void);
 void ServoInit(void);
 void ServoStop(void);
 void ServoRun(void);
+
+// -----------------LoRA Communication------------------
+void SleepTMs(void);
+void SleepRMs(void);
+void SetModuleParameters(void);
+void WakeUpTMs(void);
+void WakeUpRMs(void);
+void WaitForAUX(GPIO_TypeDef *port, uint16_t pin);
+void SendData(LoRaBuffer_t *bufferT);
+void ReveiveData(LoRaBuffer_t *bufferR);
 // -----------------Control Task------------------
 void vControlTask(void *pvParameters);
+
+// -----------------Telemetry Task------------------
+void vTelemetryTTask(void *pvParameters);
+void vTelemetryRTask(void *pvParameters);
+
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -224,7 +271,14 @@ int main(void)
   MX_I2C1_Init();
   MX_I2C2_Init();
   MX_TIM1_Init();
+  MX_UART4_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
+  SleepTMs();
+  SleepRMs();
+  //SetModuleParameters();
+  WakeUpTMs();
+  WakeUpRMs();
   findBME();
   HAL_Delay(100);
   BME280_Read_Calibration();
@@ -232,8 +286,10 @@ int main(void)
   MPU6050_Init();
   ServoInit();
 
+
   xIMUQueue = xQueueCreate(5, sizeof(IMUData_t));
   xBMEQueue = xQueueCreate(5, sizeof(BMEData_t));
+  xLoraQueue = xQueueCreate(1, sizeof(LoRaBuffer_t));
 
 
   if( xIMUQueue != NULL && xBMEQueue != NULL){
@@ -241,7 +297,8 @@ int main(void)
 	  xTaskCreate(vIMUTask, "ImuTask", 1024, NULL, 3, NULL);
 	  xTaskCreate(vBMETask, "BmeTask", 1024, NULL, 2, NULL);
 	  xTaskCreate(vControlTask, "ControlTask", 1024, NULL, 4, NULL);
-
+	  xTaskCreate(vTelemetryTTask, "TelemetryTTask", 1024, NULL, 2, NULL);
+	  xTaskCreate(vTelemetryRTask, "TelemetryRTask", 1024, NULL, 2, NULL);
 	  vTaskStartScheduler();
   }else{
 	  isQueueCreated = 0;
@@ -480,20 +537,116 @@ static void MX_TIM1_Init(void)
 }
 
 /**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 9600;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
+  * @brief UART5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART5_Init(void)
+{
+
+  /* USER CODE BEGIN UART5_Init 0 */
+
+  /* USER CODE END UART5_Init 0 */
+
+  /* USER CODE BEGIN UART5_Init 1 */
+
+  /* USER CODE END UART5_Init 1 */
+  huart5.Instance = UART5;
+  huart5.Init.BaudRate = 9600;
+  huart5.Init.WordLength = UART_WORDLENGTH_8B;
+  huart5.Init.StopBits = UART_STOPBITS_1;
+  huart5.Init.Parity = UART_PARITY_NONE;
+  huart5.Init.Mode = UART_MODE_TX_RX;
+  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart5.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART5_Init 2 */
+
+  /* USER CODE END UART5_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PF7 PF8 PF9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PG1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PE14 PE15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -715,6 +868,7 @@ void vControlTask(void *pvParameters){
 	BaseType_t xBmeStatus;
 	IMUData_t imuData;
 	BMEData_t bmeData;
+	LoRaBuffer_t loraBuffer;
 	float prevPressure = 0;
 	isControlCreated=0;
 
@@ -738,10 +892,135 @@ void vControlTask(void *pvParameters){
 			}
 
 			prevPressure = press;
+
+			loraBuffer.gX = imuData.gX;
+			loraBuffer.gY = imuData.gY;
+			loraBuffer.gZ = imuData.gZ;
+			loraBuffer.pressure = bmeData.pressure;
+
+			LoraSendStatus = xQueueOverwrite(xLoraQueue, &loraBuffer);
+
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(100));
+
 		}
 	}
 }
+
+// -----------------LoRA Communication------------------
+void SleepTMs(void){
+	HAL_GPIO_WritePin(GPIOG, GPIO_PIN_1, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET);
+	HAL_Delay(50);
+}
+
+void SleepRMs(void){
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_7, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_8, GPIO_PIN_SET);
+	HAL_Delay(50);
+}
+
+void WakeUpTMs(void){
+	HAL_GPIO_WritePin(GPIOG, GPIO_PIN_1, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_RESET);
+	HAL_Delay(50);
+}
+
+void WakeUpRMs(void){
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_7, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOF, GPIO_PIN_8, GPIO_PIN_RESET);
+	HAL_Delay(50);
+}
+
+void WaitForAUX(GPIO_TypeDef *port, uint16_t pin){
+
+
+	while(HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET){
+		vTaskDelay(pdMS_TO_TICKS(1));
+	}
+
+}
+
+void SendData(LoRaBuffer_t *buf){
+    uint8_t header = LORA_HEADER;
+    uint8_t footer = LORA_FOOTER;
+
+    HAL_UART_Transmit(&huart4, &header, 1, 20);
+    HAL_UART_Transmit(&huart4, (uint8_t*)buf, sizeof(LoRaBuffer_t), 100);
+    HAL_UART_Transmit(&huart4, &footer, 1, 20);
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+/*void SendData(LoRaBuffer_t *bufferT){
+	WaitForAUX(GPIOE,GPIO_PIN_14);
+
+	HAL_UART_Transmit(&huart4, (uint8_t*)bufferT, sizeof(LoRaBuffer_t), 500);
+}*/
+
+void ReceiveData(LoRaBuffer_t *buf){
+    uint8_t byte;
+    uint8_t raw[sizeof(LoRaBuffer_t)];
+    uint8_t footer;
+
+
+    do {
+        HAL_UART_Receive(&huart5, &byte, 1, 200);
+    } while(byte != LORA_HEADER);
+
+
+    HAL_UART_Receive(&huart5, raw, sizeof(LoRaBuffer_t), 100);
+
+
+    HAL_UART_Receive(&huart5, &footer, 1, 20);
+    if(footer == LORA_FOOTER){
+        memcpy(buf, raw, sizeof(LoRaBuffer_t));
+    }
+
+}
+
+/*void ReceiveData(LoRaBuffer_t *bufferR){
+	WaitForAUX(GPIOE,GPIO_PIN_15);
+
+	HAL_UART_Receive(&huart5, (uint8_t*)bufferR, sizeof(LoRaBuffer_t), 1000);
+}*/
+
+void SetModuleParameters(void) {
+
+    HAL_UART_Transmit(&huart4, setTCmd, 6, 100);
+    HAL_Delay(50);
+    HAL_UART_Transmit(&huart5, setRCmd, 6, 100);
+    HAL_Delay(50);
+}
+
+// -----------------Telemetry Task------------------
+void vTelemetryTTask(void *pvParameters){
+	LoRaBuffer_t loraBuffer;
+
+	for(;;){
+		LoraStatus = xQueueReceive(xLoraQueue, &loraBuffer, pdMS_TO_TICKS(10));
+
+		if(LoraStatus){
+			SendData(&loraBuffer);
+			vTaskDelay(pdMS_TO_TICKS(500));
+		}
+
+	}
+}
+
+void vTelemetryRTask(void *pvParameters){
+	LoRaBuffer_t loraBuffer;
+
+	for(;;){
+		ReceiveData(&loraBuffer);
+
+		// for debug live expressions
+		LoraGx = loraBuffer.gX;
+		LoraGy = loraBuffer.gY;
+		LoraGz = loraBuffer.gZ;
+		LoraPress = loraBuffer.pressure;
+		vTaskDelay(pdMS_TO_TICKS(200));
+	}
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
