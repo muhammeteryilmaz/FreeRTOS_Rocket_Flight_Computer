@@ -89,6 +89,8 @@ TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart5;
+DMA_HandleTypeDef hdma_uart4_tx;
+DMA_HandleTypeDef hdma_uart5_rx;
 
 /* Definitions for defaultTask */
 /*osThreadId_t defaultTaskHandle;
@@ -172,6 +174,10 @@ typedef struct {
 
 }LoRaBuffer_t;
 
+__attribute__((aligned(4))) LoRaBuffer_t dmaTxLoraBuffer;
+__attribute__((aligned(4))) LoRaBuffer_t dmaRxLoraBuffer;
+
+HAL_StatusTypeDef dmaRxStatus;
 QueueHandle_t xLoraQueue;
 
 float LoraPress;
@@ -181,11 +187,13 @@ float LoraGz;
 BaseType_t LoraStatus;
 BaseType_t LoraSendStatus;
 int counter = 0;
+int callbackCount = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_TIM1_Init(void);
@@ -222,14 +230,15 @@ void SetModuleParameters(void);
 void WakeUpTMs(void);
 void WakeUpRMs(void);
 void WaitForAUX(GPIO_TypeDef *port, uint16_t pin);
-void SendData(LoRaBuffer_t *bufferT);
-void ReveiveData(LoRaBuffer_t *bufferR);
+void SendData(void);
+void ReveiveData(void);
 // -----------------Control Task------------------
 void vControlTask(void *pvParameters);
 
 // -----------------Telemetry Task------------------
 void vTelemetryTTask(void *pvParameters);
 void vTelemetryRTask(void *pvParameters);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 
 
 /* USER CODE END PFP */
@@ -268,6 +277,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
   MX_TIM1_Init();
@@ -298,7 +308,8 @@ int main(void)
 	  xTaskCreate(vBMETask, "BmeTask", 1024, NULL, 2, NULL);
 	  xTaskCreate(vControlTask, "ControlTask", 1024, NULL, 4, NULL);
 	  xTaskCreate(vTelemetryTTask, "TelemetryTTask", 1024, NULL, 2, NULL);
-	  xTaskCreate(vTelemetryRTask, "TelemetryRTask", 1024, NULL, 2, NULL);
+	  xTaskCreate(vTelemetryRTask, "TelemetryRTask", 1024, NULL, 3, NULL);
+
 	  vTaskStartScheduler();
   }else{
 	  isQueueCreated = 0;
@@ -599,6 +610,25 @@ static void MX_UART5_Init(void)
   /* USER CODE BEGIN UART5_Init 2 */
 
   /* USER CODE END UART5_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
 
 }
 
@@ -940,48 +970,30 @@ void WaitForAUX(GPIO_TypeDef *port, uint16_t pin){
 
 }
 
-void SendData(LoRaBuffer_t *buf){
-    uint8_t header = LORA_HEADER;
-    uint8_t footer = LORA_FOOTER;
-
-    HAL_UART_Transmit(&huart4, &header, 1, 20);
-    HAL_UART_Transmit(&huart4, (uint8_t*)buf, sizeof(LoRaBuffer_t), 100);
-    HAL_UART_Transmit(&huart4, &footer, 1, 20);
-    vTaskDelay(pdMS_TO_TICKS(100));
+void SendData(void){
+	counter++;
+    HAL_UART_DMAStop(&huart4);
+    __HAL_UART_CLEAR_FLAG(&huart4, UART_FLAG_TC);
+    huart4.gState = HAL_UART_STATE_READY;
+    HAL_UART_Transmit_DMA(&huart4, (uint8_t*)&dmaTxLoraBuffer, sizeof(LoRaBuffer_t));
+    vTaskDelay(pdMS_TO_TICKS(200));
 }
 
-/*void SendData(LoRaBuffer_t *bufferT){
-	WaitForAUX(GPIOE,GPIO_PIN_14);
+void ReceiveData(void){
+	callbackCount++;
+    HAL_UART_DMAStop(&huart5);
+    dmaRxStatus = HAL_UART_Receive_DMA(&huart5, (uint8_t*)&dmaRxLoraBuffer, sizeof(LoRaBuffer_t));
 
-	HAL_UART_Transmit(&huart4, (uint8_t*)bufferT, sizeof(LoRaBuffer_t), 500);
-}*/
-
-void ReceiveData(LoRaBuffer_t *buf){
-    uint8_t byte;
-    uint8_t raw[sizeof(LoRaBuffer_t)];
-    uint8_t footer;
-
-
-    do {
-        HAL_UART_Receive(&huart5, &byte, 1, 200);
-    } while(byte != LORA_HEADER);
-
-
-    HAL_UART_Receive(&huart5, raw, sizeof(LoRaBuffer_t), 100);
-
-
-    HAL_UART_Receive(&huart5, &footer, 1, 20);
-    if(footer == LORA_FOOTER){
-        memcpy(buf, raw, sizeof(LoRaBuffer_t));
+    while(HAL_UART_GetState(&huart5) != HAL_UART_STATE_READY){
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    LoraGx = dmaRxLoraBuffer.gX;
+    LoraGy = dmaRxLoraBuffer.gY;
+    LoraGz = dmaRxLoraBuffer.gZ;
+    LoraPress = dmaRxLoraBuffer.pressure;
+    vTaskDelay(pdMS_TO_TICKS(200));
 }
-
-/*void ReceiveData(LoRaBuffer_t *bufferR){
-	WaitForAUX(GPIOE,GPIO_PIN_15);
-
-	HAL_UART_Receive(&huart5, (uint8_t*)bufferR, sizeof(LoRaBuffer_t), 1000);
-}*/
 
 void SetModuleParameters(void) {
 
@@ -993,32 +1005,22 @@ void SetModuleParameters(void) {
 
 // -----------------Telemetry Task------------------
 void vTelemetryTTask(void *pvParameters){
-	LoRaBuffer_t loraBuffer;
-
 	for(;;){
-		LoraStatus = xQueueReceive(xLoraQueue, &loraBuffer, pdMS_TO_TICKS(10));
+		LoraStatus = xQueueReceive(xLoraQueue, &dmaTxLoraBuffer, portMAX_DELAY);
 
 		if(LoraStatus){
-			SendData(&loraBuffer);
-			vTaskDelay(pdMS_TO_TICKS(500));
+			SendData();
+			vTaskDelay(pdMS_TO_TICKS(200));
 		}
 
 	}
 }
 
 void vTelemetryRTask(void *pvParameters){
-	LoRaBuffer_t loraBuffer;
-
-	for(;;){
-		ReceiveData(&loraBuffer);
-
-		// for debug live expressions
-		LoraGx = loraBuffer.gX;
-		LoraGy = loraBuffer.gY;
-		LoraGz = loraBuffer.gZ;
-		LoraPress = loraBuffer.pressure;
-		vTaskDelay(pdMS_TO_TICKS(200));
-	}
+    for(;;){
+    	ReceiveData();
+    	vTaskDelay(pdMS_TO_TICKS(200));
+    }
 }
 
 /* USER CODE END 4 */
