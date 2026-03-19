@@ -188,6 +188,9 @@ BaseType_t LoraStatus;
 BaseType_t LoraSendStatus;
 int counter = 0;
 int callbackCount = 0;
+
+// -----------------Servo Motor Run Test------------------
+TaskHandle_t servoTaskHandle;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -240,6 +243,9 @@ void vTelemetryTTask(void *pvParameters);
 void vTelemetryRTask(void *pvParameters);
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 
+// -----------------EXTI Callback------------------
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
+void vServoTask(void *pvParameters);
 
 /* USER CODE END PFP */
 
@@ -309,6 +315,7 @@ int main(void)
 	  xTaskCreate(vControlTask, "ControlTask", 1024, NULL, 4, NULL);
 	  xTaskCreate(vTelemetryTTask, "TelemetryTTask", 1024, NULL, 2, NULL);
 	  xTaskCreate(vTelemetryRTask, "TelemetryRTask", 1024, NULL, 3, NULL);
+	  xTaskCreate(vServoTask, "ServoTestTask", 1024, NULL, 5, &servoTaskHandle);
 
 	  vTaskStartScheduler();
   }else{
@@ -645,18 +652,24 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PF7 PF8 PF9 */
   GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9;
@@ -677,6 +690,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -916,9 +933,7 @@ void vControlTask(void *pvParameters){
 			hum = bmeData.humidity;
 			isControlCreated=1;
 			if((press-prevPressure) <= -5.00){
-				ServoRun();
-				vTaskDelay(pdMS_TO_TICKS(1000));
-				ServoStop();
+				xTaskNotify(servoTaskHandle, 0, eNoAction);
 			}
 
 			prevPressure = press;
@@ -1021,6 +1036,24 @@ void vTelemetryRTask(void *pvParameters){
     	ReceiveData();
     	vTaskDelay(pdMS_TO_TICKS(200));
     }
+}
+
+// -----------------Servo Motor Test Task------------------
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+	if(GPIO_Pin == GPIO_PIN_13){
+		BaseType_t woken = pdFALSE;
+		vTaskNotifyGiveFromISR(servoTaskHandle, &woken);
+		portYIELD_FROM_ISR(woken);
+	}
+}
+
+void vServoTask(void *pvParameters){
+	for(;;){
+		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		ServoRun();
+		vTaskDelay(pdMS_TO_TICKS(1000));
+		ServoStop();
+	}
 }
 
 /* USER CODE END 4 */
