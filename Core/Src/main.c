@@ -85,6 +85,8 @@
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
+IWDG_HandleTypeDef hiwdg;
+
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart4;
@@ -191,6 +193,10 @@ int callbackCount = 0;
 
 // -----------------Servo Motor Run Test------------------
 TaskHandle_t servoTaskHandle;
+
+// -----------------IWDG Task ------------------
+uint8_t taskIWGD;
+int refreshCount = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -202,6 +208,7 @@ static void MX_I2C2_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_UART4_Init(void);
 static void MX_UART5_Init(void);
+static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -246,6 +253,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 // -----------------EXTI Callback------------------
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
 void vServoTask(void *pvParameters);
+void vIWDGTask(void *pvParameters);
 
 /* USER CODE END PFP */
 
@@ -289,6 +297,7 @@ int main(void)
   MX_TIM1_Init();
   MX_UART4_Init();
   MX_UART5_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
   SleepTMs();
   SleepRMs();
@@ -316,7 +325,8 @@ int main(void)
 	  xTaskCreate(vTelemetryTTask, "TelemetryTTask", 1024, NULL, 2, NULL);
 	  xTaskCreate(vTelemetryRTask, "TelemetryRTask", 1024, NULL, 3, NULL);
 	  xTaskCreate(vServoTask, "ServoTestTask", 1024, NULL, 5, &servoTaskHandle);
-
+	  xTaskCreate(vIWDGTask, "IWDGTask", 1024, NULL, 2, NULL);
+	  HAL_IWDG_Refresh(&hiwdg);
 	  vTaskStartScheduler();
   }else{
 	  isQueueCreated = 0;
@@ -392,8 +402,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
@@ -486,6 +497,34 @@ static void MX_I2C2_Init(void)
   /* USER CODE BEGIN I2C2_Init 2 */
 
   /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
+  hiwdg.Init.Reload = 2999;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -760,8 +799,10 @@ void vIMUTask(void *pvParameters){
 		readAccelData(&data);
 		readGyroData(&data);
 		xStatus = xQueueSend(xIMUQueue, &data, 50);
+
 		if(xStatus == pdPASS){
 			// I turn on led to warning
+			taskIWGD |= 0x01;
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(50));
 		}
 	}
@@ -879,6 +920,7 @@ void vBMETask(void *pvParameters){
 
 		if(xStatus == pdPASS){
 			// I turn on led to warning
+			taskIWGD |= 0x02;
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(57));
 		}
 	}
@@ -923,6 +965,7 @@ void vControlTask(void *pvParameters){
 		xImuStatus = xQueueReceive(xIMUQueue, &imuData, 100);
 		xBmeStatus = xQueueReceive(xBMEQueue, &bmeData, 200);
 		isControlCreated=2;
+
 		if(xImuStatus && xBmeStatus){
 			gyX = imuData.gX;
 			gyY = imuData.gY;
@@ -944,6 +987,7 @@ void vControlTask(void *pvParameters){
 			loraBuffer.pressure = bmeData.pressure;
 
 			LoraSendStatus = xQueueOverwrite(xLoraQueue, &loraBuffer);
+			taskIWGD |= 0x04;
 
 			vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(100));
 
@@ -1021,10 +1065,11 @@ void SetModuleParameters(void) {
 // -----------------Telemetry Task------------------
 void vTelemetryTTask(void *pvParameters){
 	for(;;){
-		LoraStatus = xQueueReceive(xLoraQueue, &dmaTxLoraBuffer, portMAX_DELAY);
+		LoraStatus = xQueueReceive(xLoraQueue, &dmaTxLoraBuffer, pdMS_TO_TICKS(500));
 
 		if(LoraStatus){
 			SendData();
+			taskIWGD |= 0x08;
 			vTaskDelay(pdMS_TO_TICKS(200));
 		}
 
@@ -1034,6 +1079,7 @@ void vTelemetryTTask(void *pvParameters){
 void vTelemetryRTask(void *pvParameters){
     for(;;){
     	ReceiveData();
+    	taskIWGD |= 0x10;
     	vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -1055,6 +1101,22 @@ void vServoTask(void *pvParameters){
 		ServoStop();
 	}
 }
+
+// -----------------IWDG Task------------------
+void vIWDGTask(void *pvParameters){
+    for(;;){
+    	if(taskIWGD == 0x1F){
+
+            taskIWGD = 0;
+            HAL_IWDG_Refresh(&hiwdg);
+            refreshCount++;
+
+
+    	}
+    	vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 
 /* USER CODE END 4 */
 
